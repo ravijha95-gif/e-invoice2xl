@@ -1,98 +1,108 @@
-name: Build signed E-Invoice APK
+```yaml
+name: Build E-Invoice Extractor APK
 
 on:
   workflow_dispatch:
   push:
-    paths:
-      - 'twa-manifest.json'
-      - 'gradle/**'
-      - 'app/**'
-      - 'build.gradle*'
-      - 'settings.gradle*'
-      - '.github/workflows/build-apk.yml'
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   build-apk:
+    name: Build Signed Android APK
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check out Android project
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
+          cache: npm
 
       - name: Set up Android SDK
-  uses: android-actions/setup-android@v4
-  with:
-    packages: platform-tools
-    accept-android-sdk-licenses: true
-      - name: Install Android build tools
-        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+          accept-android-sdk-licenses: true
 
       - name: Install Bubblewrap CLI
         run: npm install --global @bubblewrap/cli
 
-      - name: Restore signing keystore
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      - name: Verify Build Tools
         run: |
-          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "Missing GitHub secret ANDROID_KEYSTORE_BASE64. See README.md." >&2
-            exit 1
-          fi
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/android-keystore.jks"
-          test -s "$RUNNER_TEMP/android-keystore.jks"
+          java -version
+          node --version
+          npm --version
+          bubblewrap --version
+          sdkmanager --version
 
-      - name: Check Bubblewrap project files
+      - name: Check Android Project
         run: |
           if [ ! -f twa-manifest.json ]; then
-            echo "twa-manifest.json is missing. Initialize the Bubblewrap Android project first; see README.md." >&2
-            exit 1
-          fi
-          if [ ! -f gradlew ] || [ ! -d app ]; then
-            echo "This repository contains configuration only, not the generated Android project. Run bubblewrap init once and commit the generated project files. See README.md." >&2
+            echo "ERROR: twa-manifest.json not found."
             exit 1
           fi
 
-      - name: Configure signing and build signed APK
+          if [ ! -f package.json ] && [ ! -f gradlew ]; then
+            echo "ERROR: Generated Bubblewrap Android project not found."
+            echo "Initialize the Bubblewrap project before running this workflow."
+            exit 1
+          fi
+
+      - name: Build Signed APK
         env:
-          BUBBLEWRAP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          BUBBLEWRAP_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -z "$BUBBLEWRAP_KEYSTORE_PASSWORD" ] || [ -z "$BUBBLEWRAP_KEY_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ]; then
-            echo "Missing one or more signing secrets. See README.md." >&2
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleRelease
+          else
+            bubblewrap build
+          fi
+
+      - name: Locate APK
+        id: apk
+        run: |
+          APK_PATH=$(find . -type f \
+            -name '*signed*.apk' \
+            -not -path './.git/*' \
+            -print -quit)
+
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find . -type f \
+              -path '*/build/outputs/apk/release/*.apk' \
+              -not -name '*unsigned*' \
+              -print -quit)
+          fi
+
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: No release APK found."
+            find . -type f -name '*.apk' -print
             exit 1
           fi
-          node - <<'NODE'
-          const fs = require('fs');
-          const p = 'twa-manifest.json';
-          const m = JSON.parse(fs.readFileSync(p, 'utf8'));
-          m.signingKey = {
-            ...(m.signingKey || {}),
-            path: process.env.RUNNER_TEMP + '/android-keystore.jks',
-            alias: process.env.ANDROID_KEY_ALIAS
-          };
-          fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
-          NODE
-          bubblewrap build --manifest="."
-          test -s app-release-signed.apk
 
-      - name: Upload signed APK
+          mkdir -p release
+          cp "$APK_PATH" release/einvoice-extractor.apk
+          echo "path=release/einvoice-extractor.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Signed APK
         uses: actions/upload-artifact@v4
         with:
           name: einvoice-extractor-signed-apk
-          path: app-release-signed.apk
+          path: release/einvoice-extractor.apk
           if-no-files-found: error
           retention-days: 14
+```
